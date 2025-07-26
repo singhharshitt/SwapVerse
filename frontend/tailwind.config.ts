@@ -12,7 +12,14 @@ const config: Config = {
         bitter: ['"Bitter"', 'serif'],
         nunito: ['"Nunito"', 'sans-serif'],
         libertinus: ['"Libertinus Mono"', 'monospace'],
-        wink: ['"Winky Rough"', 'cursive'], // 👈 fix quotes
+        wink: ['"Winky Rough"', 'cursive'],
+
+        // ✅ Newly added fonts:
+        bebas: ['"Bebas Neue"', 'sans-serif'],
+        lobster: ['"Lobster Two"', 'cursive'],
+        montserrat: ['"Montserrat"', 'sans-serif'],
+        pacifico: ['"Pacifico"', 'cursive'],
+        roboto: ['"Roboto"', 'sans-serif'],
       },
     },
   },
