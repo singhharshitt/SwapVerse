@@ -5,19 +5,19 @@ async function main() {
 
   const TokenA = await hre.ethers.getContractFactory("TokenA");
   const tokenA = await TokenA.deploy();
-  await tokenA.deployed();
+  await tokenA.waitForDeployment();
 
   const TokenB = await hre.ethers.getContractFactory("TokenB");
   const tokenB = await TokenB.deploy();
-  await tokenB.deployed();
+  await tokenB.waitForDeployment();
 
   const TokenSwap = await hre.ethers.getContractFactory("TokenSwap");
-  const tokenSwap = await TokenSwap.deploy(tokenA.address, tokenB.address, deployer.address);
-  await tokenSwap.deployed();
+  const tokenSwap = await TokenSwap.deploy(await tokenA.getAddress(), await tokenB.getAddress(), deployer.address);
+  await tokenSwap.waitForDeployment();
 
-  console.log("TokenA deployed to:", tokenA.address);
-  console.log("TokenB deployed to:", tokenB.address);
-  console.log("TokenSwap deployed to:", tokenSwap.address);
+  console.log("TokenA deployed to:", await tokenA.getAddress());
+  console.log("TokenB deployed to:", await tokenB.getAddress());
+  console.log("TokenSwap deployed to:", await tokenSwap.getAddress());
 }
 
 main().catch((error) => {
