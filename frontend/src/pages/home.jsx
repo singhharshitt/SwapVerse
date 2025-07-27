@@ -2,33 +2,395 @@ import { useState, useEffect } from "react";
 import history from "../assets/history.png";
 import { Link } from "react-router-dom";
 import swapp from "../assets/swapp.png";
+import web3Service from "../services/web3Service";
+import { CONTRACT_ADDRESSES } from "../config/contracts";
+import TargetCursor from '../components/TargetCursor';
+import Squares from '../components/Squares';
+import WalletModal from '../components/WalletModal';
 
 export default function Home() {
   const tokens = ["TKA7", "TKB7"];
   const [tokenA, setTokenA] = useState("");
   const [tokenB, setTokenB] = useState("");
+  const [amountA, setAmountA] = useState("");
+  const [amountB, setAmountB] = useState("");
+  
+  // Web3 state
+  const [walletAddress, setWalletAddress] = useState("");
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isSwapping, setIsSwapping] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [tokenABalance, setTokenABalance] = useState("0");
+  const [tokenBBalance, setTokenBBalance] = useState("0");
+  const [connectedWalletType, setConnectedWalletType] = useState("");
+
+  // Wallet modal state
+  const [showWalletModal, setShowWalletModal] = useState(false);
+  const [availableWallets, setAvailableWallets] = useState([]);
+
+  // Conversion rate (1 TKA7 = 0.8 TKB7)
+  const conversionRate = 0.8;
+
+  // Check if wallet is already connected on component mount
+  useEffect(() => {
+    checkWalletConnection();
+    updateAvailableWallets();
+    
+    // Listen for network changes
+    const handleNetworkChange = async () => {
+      if (walletAddress) {
+        const isSepolia = await web3Service.isConnectedToSepolia();
+        if (!isSepolia) {
+          setError("Please switch to Sepolia testnet to use this DApp.");
+        } else {
+          setError(""); // Clear error if user switches back to Sepolia
+        }
+      }
+    };
+
+    // Add event listeners for network changes
+    if (window.ethereum) {
+      window.ethereum.on('chainChanged', handleNetworkChange);
+    }
+    if (window.phantom?.ethereum) {
+      window.phantom.ethereum.on('chainChanged', handleNetworkChange);
+    }
+
+    // Cleanup event listeners
+    return () => {
+      if (window.ethereum) {
+        window.ethereum.removeListener('chainChanged', handleNetworkChange);
+      }
+      if (window.phantom?.ethereum) {
+        window.phantom.ethereum.removeListener('chainChanged', handleNetworkChange);
+      }
+    };
+  }, [walletAddress]);
+
+  // Auto-hide messages after 5 seconds
+  useEffect(() => {
+    if (error || success) {
+      const timer = setTimeout(() => {
+        setError("");
+        setSuccess("");
+      }, 5000);
+      
+      return () => clearTimeout(timer);
+    }
+  }, [error, success]);
+
+  // Update available wallets
+  const updateAvailableWallets = () => {
+    const wallets = web3Service.getAvailableWallets();
+    setAvailableWallets(wallets);
+  };
+
+  // Check wallet connection status
+  const checkWalletConnection = async () => {
+    try {
+      if (web3Service.isConnected()) {
+        const account = await web3Service.getCurrentAccount();
+        if (account) {
+          // Check if we're on the correct network
+          const isSepolia = await web3Service.isConnectedToSepolia();
+          if (!isSepolia) {
+            setError("Please switch to Sepolia testnet to use this DApp.");
+            web3Service.disconnect();
+            return;
+          }
+          
+          setWalletAddress(account);
+          setConnectedWalletType(web3Service.getConnectedWalletType());
+          await loadTokenBalances(account);
+        }
+      } else {
+        // Try auto-reconnect only if previously connected
+        const account = await web3Service.autoReconnect();
+        if (account) {
+          setWalletAddress(account);
+          setConnectedWalletType(web3Service.getConnectedWalletType());
+          await loadTokenBalances(account);
+        }
+      }
+    } catch (error) {
+      console.error('Error checking wallet connection:', error);
+      // Clear any invalid connection state
+      web3Service.disconnect();
+    }
+  };
+
+  // Load token balances
+  const loadTokenBalances = async (address) => {
+    try {
+      const balanceA = await web3Service.getTokenBalance(CONTRACT_ADDRESSES.TOKEN_A, address);
+      const balanceB = await web3Service.getTokenBalance(CONTRACT_ADDRESSES.TOKEN_B, address);
+      setTokenABalance(balanceA);
+      setTokenBBalance(balanceB);
+    } catch (error) {
+      console.error('Error loading token balances:', error);
+    }
+  };
+
+  // Handle minting messages
+  const handleMintingMessages = () => {
+    // Listen for minting success messages in console
+    const originalLog = console.log;
+    console.log = (...args) => {
+      originalLog.apply(console, args);
+      
+      const message = args.join(' ');
+      if (message.includes('Successfully minted 1000 TKA7 tokens!')) {
+        setSuccess('🎉 Successfully minted 1000 TKA7 tokens!');
+      } else if (message.includes('Successfully minted 1000 TKB7 tokens!')) {
+        setSuccess('🎉 Successfully minted 1000 TKB7 tokens!');
+      } else if (message.includes('Failed to mint TKA7') || message.includes('Failed to mint TKB7')) {
+        setError('❌ Failed to mint tokens. Please try again.');
+      }
+    };
+  };
+
+  // Show wallet selection modal
+  const showWalletSelection = () => {
+    updateAvailableWallets();
+    setShowWalletModal(true);
+  };
+
+  // Connect to specific wallet
+  const connectToWallet = async (walletType) => {
+    setIsConnecting(true);
+    setError("");
+    setSuccess("");
+    setShowWalletModal(false);
+    
+    try {
+      const address = await web3Service.connectToWallet(walletType);
+      
+      // Check if we're on the correct network after connection
+      const isSepolia = await web3Service.isConnectedToSepolia();
+      if (!isSepolia) {
+        setError("Please switch to Sepolia testnet to use this DApp. You can continue, but some features may not work.");
+      }
+      
+      setWalletAddress(address);
+      setConnectedWalletType(walletType);
+      await loadTokenBalances(address);
+      setSuccess(`Connected to ${walletType === 'metamask' ? 'MetaMask' : 'Phantom'} successfully!`);
+      
+      // Set up minting message handling
+      handleMintingMessages();
+    } catch (error) {
+      console.error('Wallet connection error:', error);
+      
+      // Handle specific rejection cases
+      if (error.message.includes('rejected') || error.message.includes('cancelled') || error.message.includes('user rejected')) {
+        setError("Connection was cancelled. Please try again when ready.");
+      } else if (error.message.includes('pending') || error.message.includes('already pending')) {
+        setError("Connection request is pending. Please check your wallet.");
+      } else if (error.message.includes('network') || error.message.includes('Network')) {
+        setError("Network error. Please check your connection and try again.");
+      } else if (error.message.includes('provider not initialized') || error.message.includes('not ready')) {
+        setError("Wallet provider not ready. Please try again.");
+      } else if (error.message.includes('not installed')) {
+        setError(error.message);
+      } else if (error.message.includes('Failed to switch') || error.message.includes('Failed to add')) {
+        setError(error.message);
+      } else {
+        setError(error.message || "Failed to connect wallet");
+      }
+      
+      // Don't reopen modal for user rejections - let them click Connect Wallet again
+      if (!error.message.includes('rejected') && !error.message.includes('cancelled') && !error.message.includes('user rejected')) {
+        // Only reopen modal for technical errors, not user rejections
+        setTimeout(() => {
+          setShowWalletModal(true);
+        }, 1000);
+      }
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  // Connect wallet (legacy function for backward compatibility)
+  const connectWallet = async () => {
+    try {
+      const wallets = await web3Service.connectWallet();
+      
+      if (wallets.length === 0) {
+        setError("No supported wallets found. Please install MetaMask or Phantom.");
+        return;
+      }
+      
+      // Always show wallet selection modal, even if only one wallet is available
+      showWalletSelection();
+    } catch (error) {
+      setError(error.message || "Failed to get available wallets");
+    }
+  };
+
+  // Disconnect wallet
+  const disconnectWallet = () => {
+    web3Service.disconnect();
+    setWalletAddress("");
+    setTokenABalance("0");
+    setTokenBBalance("0");
+    setConnectedWalletType("");
+    setError("");
+    setSuccess("");
+  };
+
+  // Execute swap
+  const executeSwap = async (e) => {
+    e.preventDefault();
+    
+    if (!web3Service.isConnected()) {
+      setError("Please connect your wallet first");
+      return;
+    }
+
+    if (!tokenA || !tokenB || !amountA || !amountB) {
+      setError("Please fill in all fields");
+      return;
+    }
+
+    setIsSwapping(true);
+    setError("");
+    setSuccess("");
+
+    try {
+      // Determine which token to approve
+      const tokenAddress = tokenA === "TKA7" ? CONTRACT_ADDRESSES.TOKEN_A : CONTRACT_ADDRESSES.TOKEN_B;
+      
+      // Approve tokens first
+      await web3Service.approveTokens(tokenAddress, amountA);
+      
+      // Execute the swap
+      const txHash = await web3Service.executeSwap(tokenA, tokenB, amountA);
+      
+      setSuccess(`Swap successful! Transaction hash: ${txHash}`);
+      
+      // Clear form
+      setAmountA("");
+      setAmountB("");
+      
+      // Reload balances
+      const account = await web3Service.getCurrentAccount();
+      if (account) {
+        await loadTokenBalances(account);
+      }
+    } catch (error) {
+      setError(error.message || "Swap failed");
+    } finally {
+      setIsSwapping(false);
+    }
+  };
+
+  // Swap tokens (UI only) - Enhanced with direction button
+  const swapTokenDirection = () => {
+    const tempToken = tokenA;
+    const tempAmount = amountA;
+
+    setTokenA(tokenB);
+    setTokenB(tempToken);
+
+    setAmountA(amountB);
+    setAmountB(tempAmount);
+  };
+
+  // Enhanced token selection with prevention of duplicates
   const handleTokenA = (e) => {
     const sel = e.target.value;
     setTokenA(sel);
-    if (sel == tokenB) {
+    
+    // Prevent selecting the same token in both dropdowns
+    if (sel === tokenB) {
       setTokenB("");
     }
+    
+    setAmountA("");
+    setAmountB("");
   };
 
   const handleTokenB = (e) => {
     const sel = e.target.value;
     setTokenB(sel);
-    if (sel == tokenA) {
+    
+    // Prevent selecting the same token in both dropdowns
+    if (sel === tokenA) {
       setTokenA("");
     }
+    
+    setAmountA("");
+    setAmountB("");
   };
+
+  const handleAmountAChange = (e) => {
+    const value = e.target.value;
+    setAmountA(value);
+
+    if (tokenA === "TKA7" && tokenB === "TKB7") {
+      setAmountB((parseFloat(value) * conversionRate).toFixed(4));
+    } else if (tokenA === "TKB7" && tokenB === "TKA7") {
+      setAmountB((parseFloat(value) / conversionRate).toFixed(4));
+    } else {
+      setAmountB("");
+    }
+  };
+
+  // Format wallet address for display
+  const formatAddress = (address) => {
+    if (!address) return "";
+    return `${address.slice(0, 6)}...${address.slice(-4)}`;
+  };
+
+  // Get wallet display name
+  const getWalletDisplayName = () => {
+    if (!connectedWalletType) return "";
+    return connectedWalletType === 'metamask' ? 'MetaMask' : 'Phantom';
+  };
+
+  // Get network status
+  const getNetworkStatus = () => {
+    if (!walletAddress) return null;
+    return (
+      <div className="text-green-400 text-xs opacity-75 cursor-target">
+        Sepolia Testnet
+      </div>
+    );
+  };
+
   return (
     <>
+      <TargetCursor 
+        spinDuration={2}
+        hideDefaultCursor={true}
+      />
+      
+      {/* Squares Background Animation */}
+      <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', zIndex: -2 }}>
+        <Squares 
+          speed={0.5} 
+          squareSize={40}
+          direction="diagonal"
+          borderColor="#F7F4F3"
+          hoverFillColor="#5B2333"
+        />
+      </div>
+      
+      {/* Wallet Selection Modal */}
+      <WalletModal
+        isOpen={showWalletModal}
+        onClose={() => setShowWalletModal(false)}
+        onSelectWallet={connectToWallet}
+        availableWallets={availableWallets}
+        isConnecting={isConnecting}
+      />
+      
       {/* Navbar */}
-      <nav className="flex items-center justify-between sticky top-0 z-50 bg-[#5B2333] p-4 md:p-8 border-b border-gray-800">
+      <nav className="flex items-center justify-between  z-50 bg-[#5B2333] p-4 md:p-8 border-b border-gray-800 shadow-[0_4px_10px_rgba(0,0,0,0.25)]">
         <div className="flex items-center">
           <h2
-            className="text-2xl md:text-4xl text-[#F7F4F3]"
+            className="text-2xl md:text-4xl text-[#F7F4F3] cursor-target"
             style={{ fontFamily: '"Pacifico", cursive' }}
           >
             SwapVerse
@@ -37,30 +399,55 @@ export default function Home() {
         <div className="flex items-center space-x-4">
           <Link
             to="/historyy"
-            className="p-2 hover:bg-gray-800 rounded-lg transition-colors"
+            className="p-2 hover:bg-gray-800 rounded-lg transition-colors cursor-target"
           >
-            <img
-              src={history}
-              alt="history"
-              className="w-6 h-6 md:w-8 md:h-8"
-            />
+            <img src={history} alt="history" className="w-6 h-6 md:w-8 md:h-8" />
           </Link>
-          <button className="border-2 border-white bg-[#F24333] px-4 py-2 rounded-xl hover:bg-[#BA1B1D] transition-colors">
-            <span
-              className="text-sm md:text-md text-white font-semibold"
-              style={{ fontFamily: '"Roboto", sans-serif' }}
+          {walletAddress ? (
+             <div className="flex items-center space-x-2">
+               <div className="text-right">
+                 <div className="text-white text-xs opacity-75 cursor-target">
+                   {getWalletDisplayName()}
+                 </div>
+                 <div className="text-white text-sm cursor-target">
+                   {formatAddress(walletAddress)}
+                 </div>
+                 {getNetworkStatus()}
+               </div>
+              <button 
+                onClick={disconnectWallet}
+                className="border-2 border-white bg-[#BA1B1D] px-4 py-2 rounded-xl hover:bg-[#F24333] transition-colors cursor-target"
+              >
+                <span
+                  className="text-sm md:text-md text-white font-semibold"
+                  style={{ fontFamily: '"Roboto", sans-serif' }}
+                >
+                  Disconnect
+                </span>
+              </button>
+            </div>
+          ) : (
+            <button 
+              onClick={connectWallet}
+              disabled={isConnecting}
+              className="border-2 border-white bg-[#F24333] px-4 py-2 rounded-xl hover:bg-[#BA1B1D] transition-colors disabled:opacity-50 cursor-target"
             >
-              Connect Wallet
-            </span>
-          </button>
+              <span
+                className="text-sm md:text-md text-white font-semibold"
+                style={{ fontFamily: '"Roboto", sans-serif' }}
+              >
+                {isConnecting ? "Connecting..." : "Connect Wallet"}
+              </span>
+            </button>
+          )}
         </div>
       </nav>
 
       {/* TOKEN SWAP FORM */}
-      <div className="min-h-screen bg-[#F7F4F3] p-4 md:p-8">
+      <div className="min-h-screen bg-transparent p-4 md:p-8">
         <div className="max-w-4xl mx-auto">
           <h1
-            className="text-3xl md:text-5xl text-[#5B2333] text-center mt-8 mb-6 font-extrabold"
+            className="text-3xl md:text-5xl text-[#5B2333] text-center mt-8 mb-6 font-extrabold cursor-target"
             style={{ fontFamily: '"Bitter", serif' }}
           >
             Welcome To{" "}
@@ -71,84 +458,107 @@ export default function Home() {
               SwapVerse
             </span>
           </h1>
-          <p className="text-[#564D4A] text-center mb-18 text-sm">
+          <p className="text-[#564D4A] text-center mb-18 text-sm cursor-target">
             <i>Your trusted platform for seamless token swapping</i>
           </p>
 
-          <div className="bg-[#332F2F] rounded-xl p-8 border border-gray-700 max-w-xl mx-auto">
-            <form style={{ fontFamily: '"Montserrat", sans-serif' }}>
+          {/* Token Balances */}
+          {walletAddress && (
+            <div className="bg-[#332F2F] rounded-xl p-4 mb-4 max-w-xl mx-auto cursor-target">
+              <h3 className="text-white text-center mb-2 font-semibold">Your Token Balances</h3>
+              <div className="flex justify-center space-x-8 text-white text-sm">
+                <div>TKA7: {parseFloat(tokenABalance).toFixed(2)}</div>
+                <div>TKB7: {parseFloat(tokenBBalance).toFixed(2)}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Error/Success Messages */}
+          {error && (
+            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4 max-w-xl mx-auto cursor-target">
+              {error}
+            </div>
+          )}
+          {success && (
+            <div className="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded mb-4 max-w-xl mx-auto cursor-target">
+              {success}
+            </div>
+          )}
+
+          <div className="bg-[#332F2F] rounded-xl p-8 border border-gray-700 max-w-xl mx-auto cursor-target">
+            <form onSubmit={executeSwap} style={{ fontFamily: '"Montserrat", sans-serif' }}>
               {/* Selling Section */}
-              <div className=" bg-[#F7F4F3] rounded-lg p-4 mt-4">
-                <label
-                  className="block text-[#5B2333] text-xs mb-2 font-semibold text-[10px]"
-                  style={{ fontFamily: '"Montserrat", sans-serif' }}
-                >
+              <div className="bg-[#F7F4F3] rounded-lg p-4 mt-4">
+                <label className="block text-[#5B2333] text-xs mb-2 font-semibold text-[10px]">
                   You're Selling
                 </label>
                 <div className="flex justify-between items-center">
                   <input
                     type="number"
                     placeholder="0.00"
-                    className="w-1/2 p-2  text-sm focus:outline-none bg-[#F7F4F3] no-spinner"
+                    value={amountA}
+                    onChange={handleAmountAChange}
+                    className="w-1/2 p-2 text-sm focus:outline-none bg-[#F7F4F3] no-spinner cursor-target"
+                    disabled={!walletAddress}
                   />
                   <select
-                    className="w-1/3 p-2 rounded-md border border-gray-300 text-sm bg-white"
-                    onChange={(e) => handleTokenA(e)}
+                    className="w-1/3 p-2 rounded-md border border-gray-300 text-sm bg-white cursor-target"
+                    onChange={handleTokenA}
                     value={tokenA}
+                    disabled={!walletAddress}
                   >
                     <option value="">-- Select Token --</option>
-                    {tokens.map((token) =>
-                      token !== tokenB ? (
-                        <option key={token} value={token}>
-                          {token}
-                        </option>
-                      ) : null
-                    )}
+                    {tokens.map((token) => (
+                      <option key={token} value={token} disabled={token === tokenB}>
+                        {token}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
 
-              {/* Swap icon */}
-              <div className="flex justify-center items-center">
-                <div
-                  className="rounded-full bg-[#0D0D0D] p-2 w-fit cursor-pointer hover:"
-                  id=""
-                >
-                  <img
-                    src={swapp}
-                    alt="swap icon"
-                    className="w-[28px] h-[28px]"
-                  />
-                </div>
-              </div>
+              {/* Swap Direction Button */}
+              <div className="flex justify-center items-center my-6">
+  <button
+    type="button"
+    onClick={swapTokenDirection}
+    disabled={!walletAddress || !tokenA || !tokenB}
+    title="Swap Token Direction"
+    className="group relative flex items-center justify-center rounded-full bg-[#0D0D0D] p-4 shadow-md hover:shadow-lg transition-all duration-300 ease-in-out disabled:opacity-30 disabled:cursor-not-allowed"
+  >
+    <img
+      src={swapp}
+      alt="Swap Icon"
+      className="w-6 h-6 transition-transform duration-300 group-hover:rotate-180"
+    />
+  </button>
+</div>
 
               {/* Buying Section */}
-              <div className="mb-6 bg-[#F7F4F3] rounded-lg p-4 ">
-                <label
-                  className="block text-[#5B2333] text-[10px] mb-2 font-semibold"
-                  style={{ fontFamily: '"Montserrat", sans-serif' }}
-                >
+              <div className="mb-6 bg-[#F7F4F3] rounded-lg p-4">
+                <label className="block text-[#5B2333] text-[10px] mb-2 font-semibold">
                   To Buy
                 </label>
                 <div className="flex justify-between items-center">
                   <input
                     type="number"
                     placeholder="0.00"
-                    className="w-1/2 p-2  text-sm focus:outline-none no-spinner"
+                    value={amountB}
+                    readOnly
+                    className="w-1/2 p-2 text-sm focus:outline-none no-spinner cursor-target"
                   />
                   <select
-                    className="w-1/3 p-2 rounded-md border border-gray-300 text-sm bg-white"
-                    onChange={(e) => handleTokenB(e)}
+                    className="w-1/3 p-2 rounded-md border border-gray-300 text-sm bg-white cursor-target"
+                    onChange={handleTokenB}
                     value={tokenB}
+                    disabled={!walletAddress}
                   >
                     <option value="">-- Select Token --</option>
-                    {tokens.map((token) =>
-                      token !== tokenA ? (
-                        <option key={token} value={token}>
-                          {token}
-                        </option>
-                      ) : null
-                    )}
+                    {tokens.map((token) => (
+                      <option key={token} value={token} disabled={token === tokenA}>
+                        {token}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -157,30 +567,71 @@ export default function Home() {
               <div className="flex justify-center">
                 <button
                   type="submit"
-                  className="bg-[#F24333] hover:bg-[#BA1B1D] text-white px-6 py-2 rounded-xl font-semibold"
+                  disabled={!walletAddress || isSwapping || !tokenA || !tokenB || !amountA}
+                  className="bg-[#F24333] hover:bg-[#BA1B1D] text-white px-6 py-2 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed cursor-target"
                 >
-                  Swap
+                  {isSwapping ? "Swapping..." : "Swap"}
                 </button>
               </div>
             </form>
           </div>
         </div>
       </div>
-      <footer className="bg-[#5B2333] w-full" style={{ fontFamily: '"Libertinus Mono", monospace' }}>
-        <div className="flex">
-          <div className="flex items-center justify-center w-full">
-            <h2 className="text-lg font-bold text-[#F7F4F3] m-4" >Designed By Harshit Singh</h2>
-          </div>
-          <div></div>
-        </div>
-        <hr className="m-4"/>
-        <div className="flex justify-center items-center w-full">
-        <p className="text-[12px] text-[#F7F4F3] ">
-          © 2025 SwapVerse. All rights reserved. Empowering seamless token swaps
-          with security and speed.
-        </p>
-        </div>
-      </footer>
+      <footer
+  className="bg-[#5B2333] w-full shadow-[0_4px_10px_rgba(0,0,0,0.25)]
+"
+  style={{ fontFamily: '"Libertinus Mono", monospace' }}
+>
+  {/* Top Section: Logo / Newsletter */}
+  <div className="flex flex-col md:flex-row justify-between items-center px-6 py-8 gap-6">
+    {/* Designed By */}
+    <div className="text-center md:text-left cursor-target">
+      <h2 className="text-lg font-bold text-[#F7F4F3]">
+        Designed By Harshit Singh
+      </h2>
+    </div>
+
+    {/* Newsletter */}
+    <div className="flex flex-col sm:flex-row items-center gap-2">
+      <input
+        type="email"
+        placeholder="Enter your email"
+        className="px-3 py-2 rounded-md text-sm focus:outline-none text-[#07090F] bg-[#F7F4F3] cursor-target"
+      />
+      <button className="bg-[#98473E] hover:bg-[#A37C40] text-white px-4 py-2 rounded-md text-sm cursor-target">
+        Subscribe
+      </button>
+    </div>
+
+    {/* Social Media */}
+    <div className="flex gap-4 text-[#F7F4F3] text-xl">
+      <a href="#" aria-label="Facebook" className="hover:text-[#A37C40] cursor-target">
+        <i className="fab fa-facebook-f"></i>
+      </a>
+      <a href="#" aria-label="Twitter" className="hover:text-[#A37C40] cursor-target">
+        <i className="fab fa-twitter"></i>
+      </a>
+      <a href="#" aria-label="Instagram" className="hover:text-[#A37C40] cursor-target">
+        <i className="fab fa-instagram"></i>
+      </a>
+      <a href="#" aria-label="LinkedIn" className="hover:text-[#A37C40] cursor-target">
+        <i className="fab fa-linkedin-in"></i>
+      </a>
+    </div>
+  </div>
+
+  {/* Divider */}
+  <hr className="m-4 border-[#C4C4C4]" />
+
+  {/* Bottom Text */}
+  <div className="flex justify-center items-center px-4 pb-6 text-center">
+    <p className="text-[12px] text-[#F7F4F3] cursor-target">
+      © 2025 SwapVerse. All rights reserved. Empowering seamless token swaps
+      with security and speed.
+    </p>
+  </div>
+</footer>
+
     </>
   );
 }
