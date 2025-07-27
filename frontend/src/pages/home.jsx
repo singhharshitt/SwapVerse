@@ -5,7 +5,7 @@ import swapp from "../assets/swapp.png";
 import web3Service from "../services/web3Service";
 import { CONTRACT_ADDRESSES } from "../config/contracts";
 import TargetCursor from '../components/TargetCursor';
-import Squares from '../components/Squares';
+import Squares from '../components/Square';
 import WalletModal from '../components/WalletModal';
 
 export default function Home() {
