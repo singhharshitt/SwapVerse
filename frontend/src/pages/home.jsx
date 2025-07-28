@@ -7,6 +7,9 @@ import { CONTRACT_ADDRESSES } from "../config/contracts";
 import TargetCursor from '../components/TargetCursor';
 import Squares from '../components/Square';
 import WalletModal from '../components/WalletModal';
+import NetworkWarningModal from '../components/NetworkWarningModal';
+import NotificationToast from '../components/NotificationToast';
+import notificationService from '../services/notificationService.jsx';
 
 export default function Home() {
   const tokens = ["TKA7", "TKB7"];
@@ -29,6 +32,11 @@ export default function Home() {
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [availableWallets, setAvailableWallets] = useState([]);
 
+  // Network warning modal state
+  const [showNetworkWarning, setShowNetworkWarning] = useState(false);
+  const [currentNetwork, setCurrentNetwork] = useState(null);
+  const [ethereumProvider, setEthereumProvider] = useState(null);
+
   // Conversion rate (1 TKA7 = 0.8 TKB7)
   const conversionRate = 0.8;
 
@@ -37,36 +45,48 @@ export default function Home() {
     checkWalletConnection();
     updateAvailableWallets();
     
-    // Listen for network changes
-    const handleNetworkChange = async () => {
-      if (walletAddress) {
-        const isSepolia = await web3Service.isConnectedToSepolia();
-        if (!isSepolia) {
-          setError("Please switch to Sepolia testnet to use this DApp.");
-        } else {
-          setError(""); // Clear error if user switches back to Sepolia
-        }
+    // Listen for custom network change events
+    const handleNetworkChanged = (event) => {
+      const { isCorrectNetwork, currentNetwork, requiresAction } = event.detail;
+      
+      if (!isCorrectNetwork && requiresAction) {
+        setCurrentNetwork(currentNetwork);
+        setShowNetworkWarning(true);
+      } else if (isCorrectNetwork) {
+        setShowNetworkWarning(false);
+        setError(""); // Clear any network errors
       }
     };
 
-    // Add event listeners for network changes
-    if (window.ethereum) {
-      window.ethereum.on('chainChanged', handleNetworkChange);
-    }
-    if (window.phantom?.ethereum) {
-      window.phantom.ethereum.on('chainChanged', handleNetworkChange);
-    }
+    // Listen for account change events
+    const handleAccountChanged = (event) => {
+      const { isConnected, currentAccount } = event.detail;
+      
+      if (!isConnected) {
+        // User disconnected
+        setWalletAddress("");
+        setTokenABalance("0");
+        setTokenBBalance("0");
+        setConnectedWalletType("");
+        setError("");
+        setSuccess("");
+      } else if (currentAccount) {
+        // Account changed
+        setWalletAddress(currentAccount);
+        loadTokenBalances(currentAccount);
+      }
+    };
+
+    // Add event listeners
+    window.addEventListener('networkChanged', handleNetworkChanged);
+    window.addEventListener('accountChanged', handleAccountChanged);
 
     // Cleanup event listeners
     return () => {
-      if (window.ethereum) {
-        window.ethereum.removeListener('chainChanged', handleNetworkChange);
-      }
-      if (window.phantom?.ethereum) {
-        window.phantom.ethereum.removeListener('chainChanged', handleNetworkChange);
-      }
+      window.removeEventListener('networkChanged', handleNetworkChanged);
+      window.removeEventListener('accountChanged', handleAccountChanged);
     };
-  }, [walletAddress]);
+  }, []);
 
   // Auto-hide messages after 5 seconds
   useEffect(() => {
@@ -89,34 +109,46 @@ export default function Home() {
   // Check wallet connection status
   const checkWalletConnection = async () => {
     try {
-      if (web3Service.isConnected()) {
+      const isConnected = web3Service.isConnected();
+      if (isConnected) {
         const account = await web3Service.getCurrentAccount();
         if (account) {
-          // Check if we're on the correct network
-          const isSepolia = await web3Service.isConnectedToSepolia();
-          if (!isSepolia) {
-            setError("Please switch to Sepolia testnet to use this DApp.");
-            web3Service.disconnect();
+          setWalletAddress(account);
+          setConnectedWalletType(web3Service.getConnectedWalletType());
+          
+          // Check network status
+          const networkStatus = await web3Service.getNetworkStatus(web3Service.provider);
+          if (!networkStatus.isCorrect) {
+            setCurrentNetwork(networkStatus.network);
+            setShowNetworkWarning(true);
             return;
           }
           
-          setWalletAddress(account);
-          setConnectedWalletType(web3Service.getConnectedWalletType());
-          await loadTokenBalances(account);
-        }
-      } else {
-        // Try auto-reconnect only if previously connected
-        const account = await web3Service.autoReconnect();
-        if (account) {
-          setWalletAddress(account);
-          setConnectedWalletType(web3Service.getConnectedWalletType());
-          await loadTokenBalances(account);
+          // Check if contracts are deployed
+          const contractsStatus = await web3Service.checkContractsDeployed();
+          if (contractsStatus) {
+            const notDeployed = Object.entries(contractsStatus).filter(([name, status]) => !status.deployed);
+            if (notDeployed.length > 0) {
+              console.warn('Some contracts are not deployed:', notDeployed);
+              notificationService.warning(
+                `Some contracts are not deployed on Sepolia testnet. Please deploy contracts first.`,
+                10000
+              );
+            }
+          }
+          
+          // Initialize contracts and get balances
+          await web3Service.initializeContracts();
+          const tokenABalance = await web3Service.getTokenBalance(CONTRACT_ADDRESSES.TOKEN_A, account);
+          const tokenBBalance = await web3Service.getTokenBalance(CONTRACT_ADDRESSES.TOKEN_B, account);
+          
+          setTokenABalance(tokenABalance);
+          setTokenBBalance(tokenBBalance);
         }
       }
     } catch (error) {
       console.error('Error checking wallet connection:', error);
-      // Clear any invalid connection state
-      web3Service.disconnect();
+      notificationService.error('Error checking wallet connection: ' + error.message);
     }
   };
 
@@ -164,18 +196,30 @@ export default function Home() {
     setShowWalletModal(false);
     
     try {
+      // Store the ethereum provider for network switching
+      let provider;
+      if (walletType === 'metamask') {
+        provider = window.ethereum;
+      } else if (walletType === 'phantom') {
+        provider = window.phantom?.ethereum;
+      }
+      setEthereumProvider(provider);
+      
       const address = await web3Service.connectToWallet(walletType);
       
       // Check if we're on the correct network after connection
       const isSepolia = await web3Service.isConnectedToSepolia();
       if (!isSepolia) {
-        setError("Please switch to Sepolia testnet to use this DApp. You can continue, but some features may not work.");
+        const networkStatus = await web3Service.getNetworkStatus();
+        if (networkStatus && !networkStatus.isCorrect) {
+          setCurrentNetwork(networkStatus.network);
+          setShowNetworkWarning(true);
+        }
       }
       
       setWalletAddress(address);
       setConnectedWalletType(walletType);
       await loadTokenBalances(address);
-      setSuccess(`Connected to ${walletType === 'metamask' ? 'MetaMask' : 'Phantom'} successfully!`);
       
       // Set up minting message handling
       handleMintingMessages();
@@ -237,6 +281,9 @@ export default function Home() {
     setConnectedWalletType("");
     setError("");
     setSuccess("");
+    setShowNetworkWarning(false);
+    setCurrentNetwork(null);
+    setEthereumProvider(null);
   };
 
   // Execute swap
@@ -258,8 +305,22 @@ export default function Home() {
     setSuccess("");
 
     try {
+      // Validate network before swap
+      const isSepolia = await web3Service.isConnectedToSepolia();
+      if (!isSepolia) {
+        const networkStatus = await web3Service.getNetworkStatus();
+        if (networkStatus && !networkStatus.isCorrect) {
+          setCurrentNetwork(networkStatus.network);
+          setShowNetworkWarning(true);
+          return;
+        }
+      }
+
       // Determine which token to approve
       const tokenAddress = tokenA === "TKA7" ? CONTRACT_ADDRESSES.TOKEN_A : CONTRACT_ADDRESSES.TOKEN_B;
+      
+      // Show pending notification
+      notificationService.transactionPending();
       
       // Approve tokens first
       await web3Service.approveTokens(tokenAddress, amountA);
@@ -267,6 +328,8 @@ export default function Home() {
       // Execute the swap
       const txHash = await web3Service.executeSwap(tokenA, tokenB, amountA);
       
+      // Show success notification
+      notificationService.transactionSuccess(txHash);
       setSuccess(`Swap successful! Transaction hash: ${txHash}`);
       
       // Clear form
@@ -279,6 +342,10 @@ export default function Home() {
         await loadTokenBalances(account);
       }
     } catch (error) {
+      console.error('Swap error:', error);
+      
+      // Show error notification
+      notificationService.transactionFailed(error.message);
       setError(error.message || "Swap failed");
     } finally {
       setIsSwapping(false);
@@ -385,6 +452,22 @@ export default function Home() {
         availableWallets={availableWallets}
         isConnecting={isConnecting}
       />
+
+      {/* Network Warning Modal */}
+      <NetworkWarningModal
+        isOpen={showNetworkWarning}
+        onClose={() => setShowNetworkWarning(false)}
+        currentNetwork={currentNetwork}
+        ethereumProvider={ethereumProvider}
+        onNetworkSwitch={() => {
+          setShowNetworkWarning(false);
+          // Refresh the page or reload balances after network switch
+          window.location.reload();
+        }}
+      />
+
+      {/* Notification Toast */}
+      <NotificationToast />
       
       {/* Navbar */}
       <nav className="flex items-center justify-between  z-50 bg-[#5B2333] p-4 md:p-8 border-b border-gray-800 shadow-[0_4px_10px_rgba(0,0,0,0.25)]">

@@ -1,6 +1,8 @@
 import { ethers } from 'ethers';
 import { CONTRACT_ADDRESSES, NETWORK_CONFIG } from '../config/contracts';
 import { ERC20_ABI, TOKEN_SWAP_ABI } from '../config/contractABIs';
+import networkService from './networkService';
+import notificationService from './notificationService.jsx';
 
 // Token configuration for MetaMask watchAsset
 const TOKEN_CONFIG = {
@@ -219,13 +221,22 @@ class Web3Service {
       this.signer = await this.provider.getSigner();
       this.connectedWallet = walletType;
 
+      // Setup network listeners
+      networkService.setupNetworkListeners(
+        ethereumProvider,
+        this.handleNetworkChange.bind(this),
+        this.handleAccountChange.bind(this)
+      );
+
       // Check if we're on the correct network (Sepolia)
-      const network = await this.provider.getNetwork();
-      if (network.chainId !== BigInt(11155111)) { // Sepolia testnet
+      const isCorrectNetwork = await networkService.isConnectedToCorrectNetwork(this.provider);
+      if (!isCorrectNetwork) {
         try {
-          await this.switchToSepoliaNetwork(ethereumProvider);
+          await networkService.switchToSepolia(ethereumProvider);
+          notificationService.networkSwitchSuccess();
         } catch (error) {
           console.error('Could not switch to Sepolia network:', error);
+          notificationService.networkSwitchFailed(error.message);
           // Reset provider and signer since network switch failed
           this.provider = null;
           this.signer = null;
@@ -254,6 +265,7 @@ class Web3Service {
         console.error('Error minting tokens:', error);
       });
 
+      notificationService.walletConnected(walletType === 'metamask' ? 'MetaMask' : 'Phantom');
       return accounts[0];
     } catch (error) {
       console.error('Error connecting wallet:', error);
@@ -293,61 +305,68 @@ class Web3Service {
     return availableWallets;
   }
 
-  // Switch to Sepolia testnet
-  async switchToSepoliaNetwork(ethereumProvider) {
-    try {
-      await ethereumProvider.request({
-        method: 'wallet_addEthereumChain',
-        params: [{
-          chainId: NETWORK_CONFIG.chainId,
-          chainName: NETWORK_CONFIG.chainName,
-          nativeCurrency: NETWORK_CONFIG.nativeCurrency,
-          rpcUrls: NETWORK_CONFIG.rpcUrls,
-          blockExplorerUrls: NETWORK_CONFIG.blockExplorerUrls
-        }]
-      });
-    } catch (error) {
-      console.log('Network addition error:', error);
+  // Handle network changes
+  handleNetworkChange(networkInfo) {
+    console.log('Network changed:', networkInfo);
+    
+    if (!networkInfo.isCorrectNetwork) {
+      notificationService.networkError(networkInfo.name);
       
-      // If the network is already added, try to switch to it
-      if (error.code === 4902) {
-        try {
-          await ethereumProvider.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: NETWORK_CONFIG.chainId }]
-          });
-        } catch (switchError) {
-          console.log('Network switch error:', switchError);
-          
-          if (switchError.code === 4902) {
-            throw new Error('Failed to switch to Sepolia network. Please add it manually in your wallet.');
-          } else if (switchError.code === 4001) {
-            throw new Error('Network switch was rejected by user.');
-          } else {
-            throw new Error('Failed to switch to Sepolia network. Please try again.');
-          }
+      // Emit a custom event for the UI to handle
+      const event = new CustomEvent('networkChanged', {
+        detail: {
+          isCorrectNetwork: false,
+          currentNetwork: networkInfo,
+          requiresAction: true
         }
-      } else if (error.code === 4001) {
-        throw new Error('Network addition was rejected by user.');
-      } else if (error.message && error.message.includes('nativeCurrency.symbol does not match')) {
-        // Handle the specific MetaMask RPC error
-        console.log('MetaMask RPC error detected, trying to switch instead of add');
-        try {
-          await ethereumProvider.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: NETWORK_CONFIG.chainId }]
-          });
-        } catch (switchError) {
-          console.log('Switch after RPC error failed:', switchError);
-          if (switchError.code === 4001) {
-            throw new Error('Network switch was rejected by user.');
-          } else {
-            throw new Error('Failed to switch to Sepolia network. Please try again.');
-          }
+      });
+      window.dispatchEvent(event);
+    } else {
+      // Clear any network error notifications
+      notificationService.success('Connected to Sepolia testnet');
+      
+      // Emit a custom event for the UI to handle
+      const event = new CustomEvent('networkChanged', {
+        detail: {
+          isCorrectNetwork: true,
+          currentNetwork: networkInfo,
+          requiresAction: false
         }
-      } else {
-        throw new Error('Failed to add Sepolia network. Please try again.');
-      }
+      });
+      window.dispatchEvent(event);
+    }
+  }
+
+  // Handle account changes
+  handleAccountChange(accounts) {
+    console.log('Account changed:', accounts);
+    
+    if (accounts.length === 0) {
+      // User disconnected
+      this.disconnect();
+      notificationService.walletDisconnected();
+      
+      // Emit a custom event for the UI to handle
+      const event = new CustomEvent('accountChanged', {
+        detail: {
+          accounts: [],
+          isConnected: false
+        }
+      });
+      window.dispatchEvent(event);
+    } else {
+      // Account changed but still connected
+      notificationService.info('Account changed');
+      
+      // Emit a custom event for the UI to handle
+      const event = new CustomEvent('accountChanged', {
+        detail: {
+          accounts,
+          isConnected: true,
+          currentAccount: accounts[0]
+        }
+      });
+      window.dispatchEvent(event);
     }
   }
 
@@ -384,6 +403,9 @@ class Web3Service {
   // Get token balance
   async getTokenBalance(tokenAddress, userAddress) {
     try {
+      // Validate network before operation
+      await this.validateNetwork();
+      
       // Use existing contract instances if available, otherwise create new ones
       let contract;
       if (tokenAddress === CONTRACT_ADDRESSES.TOKEN_A && this.tokenAContract) {
@@ -407,11 +429,30 @@ class Web3Service {
         }
       }
       
+      // Add debugging information
+      console.log('🔍 Getting token balance for:', {
+        tokenAddress,
+        userAddress,
+        contractAddress: contract.target,
+        provider: !!this.provider,
+        signer: !!this.signer
+      });
+      
+      // Check if contract exists at the address
+      const code = await this.provider.getCode(tokenAddress);
+      if (code === '0x') {
+        throw new Error(`No contract found at address ${tokenAddress}. Please ensure contracts are deployed to Sepolia testnet.`);
+      }
+      
       const balance = await contract.balanceOf(userAddress);
       const decimals = await contract.decimals();
       return ethers.formatUnits(balance, decimals);
     } catch (error) {
       console.error('Error getting token balance:', error);
+      // Return a more informative error message
+      if (error.message.includes('No contract found')) {
+        throw new Error(`Contract not deployed at ${tokenAddress}. Please deploy contracts to Sepolia testnet first.`);
+      }
       return '0';
     }
   }
@@ -419,6 +460,23 @@ class Web3Service {
   // Approve tokens for swap
   async approveTokens(tokenAddress, amount) {
     try {
+      // Validate network before operation
+      await this.validateNetwork();
+      
+      // Add debugging information
+      console.log('🔍 Approving tokens:', {
+        tokenAddress,
+        amount,
+        signer: !!this.signer,
+        swapContract: CONTRACT_ADDRESSES.TOKEN_SWAP
+      });
+      
+      // Check if contract exists at the address
+      const code = await this.provider.getCode(tokenAddress);
+      if (code === '0x') {
+        throw new Error(`No contract found at address ${tokenAddress}. Please ensure contracts are deployed to Sepolia testnet.`);
+      }
+      
       const contract = new ethers.Contract(tokenAddress, ERC20_ABI, this.signer);
       const decimals = await contract.decimals();
       const amountWei = ethers.parseUnits(amount.toString(), decimals);
@@ -428,6 +486,10 @@ class Web3Service {
       return true;
     } catch (error) {
       console.error('Error approving tokens:', error);
+      // Return a more informative error message
+      if (error.message.includes('No contract found')) {
+        throw new Error(`Contract not deployed at ${tokenAddress}. Please deploy contracts to Sepolia testnet first.`);
+      }
       throw error;
     }
   }
@@ -435,6 +497,9 @@ class Web3Service {
   // Execute swap
   async executeSwap(fromToken, toToken, amount) {
     try {
+      // Validate network before operation
+      await this.validateNetwork();
+      
       if (!this.tokenSwapContract) {
         throw new Error('Contracts not initialized');
       }
@@ -478,6 +543,14 @@ class Web3Service {
 
   // Disconnect wallet
   disconnect() {
+    // Cleanup network listeners
+    if (this.provider) {
+      const ethereumProvider = this.provider.provider;
+      if (ethereumProvider) {
+        networkService.removeNetworkListeners(ethereumProvider);
+      }
+    }
+    
     this.provider = null;
     this.signer = null;
     this.tokenSwapContract = null;
@@ -545,20 +618,17 @@ class Web3Service {
     }
   }
 
-  // Handle network changes
-  async handleNetworkChange() {
+  // Validate network before any operation
+  async validateNetwork() {
     try {
-      if (!this.provider) return;
-      
-      const network = await this.provider.getNetwork();
-      if (network.chainId !== BigInt(11155111)) { // Sepolia testnet
-        console.warn('Wrong network detected. Please switch to Sepolia testnet.');
-        return false;
+      if (!this.provider) {
+        throw new Error('Wallet not connected');
       }
-      return true;
+      
+      return await networkService.validateNetwork(this.provider, this.provider.provider);
     } catch (error) {
-      console.error('Error checking network:', error);
-      return false;
+      console.error('Network validation failed:', error);
+      throw error;
     }
   }
 
@@ -566,11 +636,7 @@ class Web3Service {
   async getCurrentNetwork() {
     try {
       if (!this.provider) return null;
-      const network = await this.provider.getNetwork();
-      return {
-        chainId: network.chainId,
-        name: network.name
-      };
+      return await networkService.getCurrentNetwork(this.provider);
     } catch (error) {
       console.error('Error getting network info:', error);
       return null;
@@ -579,8 +645,65 @@ class Web3Service {
 
   // Check if connected to Sepolia
   async isConnectedToSepolia() {
-    const network = await this.getCurrentNetwork();
-    return network && network.chainId === BigInt(11155111);
+    try {
+      if (!this.provider) return false;
+      return await networkService.isConnectedToCorrectNetwork(this.provider);
+    } catch (error) {
+      console.error('Error checking Sepolia connection:', error);
+      return false;
+    }
+  }
+
+  // Check if contracts are deployed
+  async checkContractsDeployed() {
+    try {
+      const results = {};
+      
+      for (const [name, address] of Object.entries(CONTRACT_ADDRESSES)) {
+        try {
+          const code = await this.provider.getCode(address);
+          results[name] = {
+            address,
+            deployed: code !== '0x',
+            codeLength: code.length
+          };
+        } catch (error) {
+          results[name] = {
+            address,
+            deployed: false,
+            error: error.message
+          };
+        }
+      }
+      
+      return results;
+    } catch (error) {
+      console.error('Error checking contracts deployment:', error);
+      return null;
+    }
+  }
+
+  // Get network status for UI display
+  async getNetworkStatus(provider) {
+    try {
+      const isCorrect = await networkService.isConnectedToCorrectNetwork(provider);
+      const network = await this.getCurrentNetwork(provider);
+      
+      return {
+        isCorrect,
+        network,
+        status: isCorrect ? 'connected' : 'wrong-network',
+        message: isCorrect ? 'Connected to Sepolia' : `Connected to ${network?.name || 'unknown network'}`
+      };
+    } catch (error) {
+      console.error('Error getting network status:', error);
+      return {
+        isCorrect: false,
+        network: null,
+        status: 'error',
+        message: 'Network error'
+      };
+    }
   }
 }
 
