@@ -12,6 +12,6 @@ export const NETWORK_CONFIG = {
     symbol: "ETH", // Changed from 'SEP' to 'ETH' to fix MetaMask RPC error
     decimals: 18
   },
-  rpcUrls: ["https://rpc.sepolia.org"], // Updated to use the correct RPC URL
-  blockExplorerUrls: ["https://sepolia.etherscan.io"] // Added block explorer URL
+  rpcUrls: [import.meta.env.VITE_ALCHEMY_API_URL || "https://rpc.sepolia.org"], // Use env or fallback
+  blockExplorerUrls: ["https://sepolia.etherscan.io"]
 }; 
